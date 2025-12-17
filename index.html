@@ -13,9 +13,10 @@
     <div id="root"></div>
     
     <script type="text/babel">
-        const { useState, useMemo } = React;
+        const { useState } = React;
         
         const FilmRecommender = () => {
+          const [username, setUsername] = useState('');
           const [ratingsData, setRatingsData] = useState(null);
           const [watchlistData, setWatchlistData] = useState(null);
           const [enrichedFilms, setEnrichedFilms] = useState(null);
@@ -48,6 +49,132 @@
               });
               return obj;
             });
+          };
+
+          const fetchLetterboxdData = async (username, type = 'ratings') => {
+            try {
+              setProgress(`Fetching ${type} from Letterboxd...`);
+              
+              const proxyUrl = 'https://api.allorigins.win/raw?url=';
+              const letterboxdUrl = type === 'ratings' 
+                ? `https://letterboxd.com/${username}/films/` 
+                : `https://letterboxd.com/${username}/watchlist/`;
+              
+              const response = await fetch(proxyUrl + encodeURIComponent(letterboxdUrl));
+              const html = await response.text();
+              
+              const parser = new DOMParser();
+              const doc = parser.parseFromString(html, 'text/html');
+              
+              const films = [];
+              const filmElements = doc.querySelectorAll('li.poster-container');
+              
+              if (filmElements.length === 0) {
+                throw new Error(`No ${type} found. Check if the username is correct and the profile is public.`);
+              }
+              
+              filmElements.forEach(el => {
+                const filmDiv = el.querySelector('div[data-film-slug]');
+                const filmName = filmDiv?.getAttribute('data-film-name');
+                const filmYear = filmDiv?.getAttribute('data-film-release-year');
+                const rating = el.querySelector('.rating')?.className.match(/rated-(\d+)/)?.[1];
+                
+                if (filmName && filmYear) {
+                  const filmData = {
+                    Name: filmName,
+                    Year: filmYear,
+                    'Letterboxd URI': `https://letterboxd.com/film/${filmDiv.getAttribute('data-film-slug')}/`
+                  };
+                  
+                  if (type === 'ratings' && rating) {
+                    filmData.Rating = (parseInt(rating) / 2).toString();
+                  }
+                  
+                  films.push(filmData);
+                }
+              });
+              
+              // For ratings, we need to fetch all pages
+              if (type === 'ratings') {
+                let page = 2;
+                let hasMore = true;
+                
+                while (hasMore && page <= 10) {
+                  setProgress(`Fetching ${type} page ${page}...`);
+                  const pageUrl = `${letterboxdUrl}page/${page}/`;
+                  const pageResponse = await fetch(proxyUrl + encodeURIComponent(pageUrl));
+                  const pageHtml = await pageResponse.text();
+                  const pageDoc = parser.parseFromString(pageHtml, 'text/html');
+                  const pageFilms = pageDoc.querySelectorAll('li.poster-container');
+                  
+                  if (pageFilms.length === 0) {
+                    hasMore = false;
+                  } else {
+                    pageFilms.forEach(el => {
+                      const filmDiv = el.querySelector('div[data-film-slug]');
+                      const filmName = filmDiv?.getAttribute('data-film-name');
+                      const filmYear = filmDiv?.getAttribute('data-film-release-year');
+                      const rating = el.querySelector('.rating')?.className.match(/rated-(\d+)/)?.[1];
+                      
+                      if (filmName && filmYear) {
+                        const filmData = {
+                          Name: filmName,
+                          Year: filmYear,
+                          'Letterboxd URI': `https://letterboxd.com/film/${filmDiv.getAttribute('data-film-slug')}/`
+                        };
+                        
+                        if (rating) {
+                          filmData.Rating = (parseInt(rating) / 2).toString();
+                        }
+                        
+                        films.push(filmData);
+                      }
+                    });
+                    page++;
+                  }
+                  
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                }
+              }
+              
+              return films;
+            } catch (err) {
+              throw new Error(`Failed to fetch ${type}: ${err.message}`);
+            }
+          };
+
+          const handleFetchData = async () => {
+            if (!username.trim()) {
+              setError('Please enter a Letterboxd username');
+              return;
+            }
+            
+            setLoading(true);
+            setError('');
+            setProgress('');
+            setRatingsData(null);
+            setWatchlistData(null);
+            setEnrichedFilms(null);
+            setRecommendations([]);
+            
+            try {
+              const ratings = await fetchLetterboxdData(username.trim(), 'ratings');
+              setRatingsData(ratings);
+              
+              try {
+                const watchlist = await fetchLetterboxdData(username.trim(), 'watchlist');
+                setWatchlistData(watchlist);
+              } catch (err) {
+                console.log('Watchlist fetch failed, continuing without it:', err);
+              }
+              
+              setProgress('');
+              setLoading(false);
+            } catch (err) {
+              setError(err.message);
+              setProgress('');
+              setLoading(false);
+            }
           };
 
           const handleFileUpload = async (e, type) => {
@@ -302,49 +429,70 @@
                 <div className="text-center mb-8 md:mb-12">
                   <div className="text-5xl mb-4">🎬</div>
                   <h1 className="text-3xl md:text-4xl font-bold mb-2">Letterboxd Film Recommender</h1>
-                  <p className="text-slate-300">Upload your data and discover your next favorite film</p>
+                  <p className="text-slate-300">Enter your username or upload CSVs to discover films</p>
                 </div>
 
-                <div className="grid md:grid-cols-2 gap-4 md:gap-6 mb-6 md:mb-8">
-                  <div className="bg-slate-800/50 backdrop-blur p-4 md:p-6 rounded-lg border border-slate-700">
-                    <h3 className="text-lg md:text-xl font-semibold mb-4 flex items-center gap-2">
-                      📤 Ratings CSV (Required)
-                    </h3>
-                    <input
-                      type="file"
-                      accept=".csv"
-                      onChange={(e) => handleFileUpload(e, 'ratings')}
-                      className="w-full p-2 bg-slate-700 rounded border border-slate-600 text-sm"
-                    />
-                    {ratingsData && (
-                      <p className="mt-2 text-green-400 text-sm">✓ {ratingsData.length} films loaded</p>
-                    )}
+                {!ratingsData && (
+                  <div className="bg-slate-800/50 backdrop-blur p-6 rounded-lg border border-slate-700 mb-8">
+                    <h3 className="text-xl font-semibold mb-4">Option 1: Enter Letterboxd Username</h3>
+                    <div className="flex gap-2 mb-6">
+                      <input
+                        type="text"
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        placeholder="Your Letterboxd username"
+                        className="flex-1 p-3 bg-slate-700 rounded border border-slate-600 text-white"
+                        onKeyPress={(e) => e.key === 'Enter' && handleFetchData()}
+                      />
+                      <button
+                        onClick={handleFetchData}
+                        disabled={loading}
+                        className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-600 px-6 py-3 rounded font-semibold transition"
+                      >
+                        {loading ? 'Fetching...' : 'Fetch Data'}
+                      </button>
+                    </div>
+                    
+                    <div className="text-center text-slate-400 my-4">OR</div>
+                    
+                    <h3 className="text-xl font-semibold mb-4">Option 2: Upload CSV Files</h3>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm mb-2">📤 Ratings CSV (Required)</label>
+                        <input
+                          type="file"
+                          accept=".csv"
+                          onChange={(e) => handleFileUpload(e, 'ratings')}
+                          className="w-full p-2 bg-slate-700 rounded border border-slate-600 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm mb-2">📋 Watchlist CSV (Optional)</label>
+                        <input
+                          type="file"
+                          accept=".csv"
+                          onChange={(e) => handleFileUpload(e, 'watchlist')}
+                          className="w-full p-2 bg-slate-700 rounded border border-slate-600 text-sm"
+                        />
+                      </div>
+                    </div>
                   </div>
-
-                  <div className="bg-slate-800/50 backdrop-blur p-4 md:p-6 rounded-lg border border-slate-700">
-                    <h3 className="text-lg md:text-xl font-semibold mb-4 flex items-center gap-2">
-                      📋 Watchlist CSV (Optional)
-                    </h3>
-                    <input
-                      type="file"
-                      accept=".csv"
-                      onChange={(e) => handleFileUpload(e, 'watchlist')}
-                      className="w-full p-2 bg-slate-700 rounded border border-slate-600 text-sm"
-                    />
-                    {watchlistData && (
-                      <p className="mt-2 text-green-400 text-sm">✓ {watchlistData.length} films loaded</p>
-                    )}
-                  </div>
-                </div>
+                )}
 
                 {ratingsData && !enrichedFilms && (
-                  <button
-                    onClick={enrichFilmData}
-                    disabled={loading}
-                    className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-600 p-3 md:p-4 rounded-lg font-semibold mb-6 md:mb-8 transition"
-                  >
-                    {loading ? progress || 'Fetching film data...' : 'Step 1: Analyze My Ratings'}
-                  </button>
+                  <div className="bg-slate-800/50 backdrop-blur p-6 rounded-lg border border-slate-700 mb-8">
+                    <div className="mb-4">
+                      <p className="text-green-400 mb-2">✓ {ratingsData.length} rated films loaded</p>
+                      {watchlistData && <p className="text-green-400">✓ {watchlistData.length} watchlist films loaded</p>}
+                    </div>
+                    <button
+                      onClick={enrichFilmData}
+                      disabled={loading}
+                      className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-600 p-4 rounded-lg font-semibold transition"
+                    >
+                      {loading ? progress || 'Fetching film data...' : 'Step 1: Analyze My Ratings'}
+                    </button>
+                  </div>
                 )}
 
                 {enrichedFilms && (
@@ -453,6 +601,12 @@
                 {error && (
                   <div className="bg-red-900/50 border border-red-700 p-4 rounded-lg text-sm">
                     {error}
+                  </div>
+                )}
+                
+                {progress && (
+                  <div className="bg-blue-900/50 border border-blue-700 p-4 rounded-lg text-sm text-center">
+                    {progress}
                   </div>
                 )}
                 
